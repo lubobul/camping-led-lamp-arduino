@@ -2,85 +2,133 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Encoder.h> // The library for reading the rotary encoder
+#include <Encoder.h>
 
 // --- Pin Definitions ---
-// Define the pins for your rotary encoder's rotation function
 #define ENCODER_PIN_A 2
 #define ENCODER_PIN_B 3
-
-// Define the pin for your rotary encoder's push-button switch
 #define ENCODER_SWITCH_PIN 4
+#define PWM_OUTPUT_PIN 9 // Using pin D9 for safe, fast PWM
 
 // --- OLED Display Setup ---
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
-#define OLED_RESET    -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // --- Encoder Setup ---
-// Create an Encoder object that will read pins A and B
 Encoder myEncoder(ENCODER_PIN_A, ENCODER_PIN_B);
 
 // --- Global Variables ---
-long oldEncoderValue = -999; // A variable to store the last known encoder value
-bool buttonState = false;    // A variable to track the button state
+int brightness = 50; // Start at 50% brightness
+int lastDisplayedBrightness = -1; // To track when the display needs updating
+bool isLampOn = true; // Start with the lamp ON
+bool lastDisplayedState = false; // To track when the display needs updating
+
+// Variables for button debouncing
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
+bool buttonState = HIGH;      // The debounced, stable state of the switch
+bool lastButtonState = HIGH;  // The last raw reading of the switch
 
 void setup() {
-  // --- Initialize OLED ---
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    // If the display fails to initialize, do nothing.
     for(;;); 
   }
 
-  // --- Initialize Encoder Pins ---
-  // We use INPUT_PULLUP because we are connecting the common pin to GND.
-  // This activates the Arduino's internal pull-up resistors, so we don't need external ones.
   pinMode(ENCODER_SWITCH_PIN, INPUT_PULLUP);
+  pinMode(PWM_OUTPUT_PIN, OUTPUT);
 
-  // --- Initial Display Message ---
+  // Configure silent, ~31kHz PWM on Pin 9
+  TCCR1A = _BV(COM1A1) | _BV(WGM11);
+  TCCR1B = _BV(WGM13) | _BV(WGM12) | _BV(CS10);
+  ICR1 = 511;
+  OCR1A = 0;
+
+  // Set the initial encoder position to match our starting brightness
+  myEncoder.write(brightness * 4);
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  display.println("Rotary Encoder Test");
+  display.println("Dimmer Ready!");
   display.display();
-  delay(2000); // Show message for 2 seconds
+  delay(1000); 
 }
 
 void loop() {
-  // Read the current value from the encoder
-  long newEncoderValue = myEncoder.read();
+  // --- 1. Check for Button Press (On/Off) with Debouncing ---
+  bool reading = digitalRead(ENCODER_SWITCH_PIN);
 
-  // Read the button state. It will be LOW when pressed because of the pull-up resistor.
-  bool newButtonState = (digitalRead(ENCODER_SWITCH_PIN) == LOW);
+  // If the switch state has changed, reset the debounce timer
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
 
-  // This 'if' block only runs if the encoder value has changed OR the button state has changed.
-  // This is efficient and prevents the screen from flickering.
-  if (newEncoderValue != oldEncoderValue || newButtonState != buttonState) {
+  // After the debounce delay has passed, check the state again
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    // If the reading has been stable and is different from the last known stable state
+    if (reading != buttonState) {
+      buttonState = reading; // Update the stable state
 
-    // Update the stored values
-    oldEncoderValue = newEncoderValue;
-    buttonState = newButtonState;
+      // If the new stable state is a press (transition to LOW)
+      if (buttonState == LOW) {
+        isLampOn = !isLampOn; // Toggle the on/off state
+      }
+    }
+  }
+  lastButtonState = reading; // Save the current reading for the next loop
 
-    // Clear the screen and set up the text style
+  // --- 2. Read Encoder (only if lamp is on) ---
+  if (isLampOn) {
+    long newEncoderValue = myEncoder.read() / 4;
+    brightness = constrain(newEncoderValue, 0, 100);
+    if (brightness != newEncoderValue) {
+      myEncoder.write(brightness * 4);
+    }
+  } else {
+    // If lamp is off, ensure brightness is 0 and encoder is reset
+    brightness = 0;
+    myEncoder.write(0);
+  }
+
+  // --- 3. Update PWM and Display ---
+  // This section only runs if the state has changed, to prevent flickering
+  if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState) {
+    
     display.clearDisplay();
     display.setTextSize(2);
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
 
-    // Display the current encoder value
-    display.print("Val: ");
-    display.println(newEncoderValue);
+    if (isLampOn) {
+      // --- Lamp is ON ---
+      int pwmValue;
+      // Specific check to fix the 0% glow issue
+      if (brightness == 0) {
+        pwmValue = 0; // Force output to be completely off
+      } else {
+        pwmValue = map(brightness, 0, 100, 0, 511);
+      }
+      OCR1A = pwmValue; 
+      
+      // Changed label to "Pwr:" to ensure it fits on one line
+      display.setCursor(0, 20);
+      display.print("Pwr: ");
+      display.print(brightness);
+      display.println("%");
 
-    // If the button is currently being pressed, display a message
-    if (buttonState == true) {
-      display.setTextSize(1);
-      display.setCursor(0, 30);
-      display.println("Button Pressed!");
+    } else {
+      // --- Lamp is OFF ---
+      OCR1A = 0; // Ensure PWM is off
+      
+      display.setCursor(35, 20); // Center the text
+      display.println("OFF");
     }
-    
-    // Send the updated information to the OLED display
+
     display.display();
+    lastDisplayedBrightness = brightness;
+    lastDisplayedState = isLampOn;
   }
 }
+
