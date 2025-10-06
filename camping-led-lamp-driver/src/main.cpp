@@ -3,6 +3,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Encoder.h>
+#include <Bounce2.h>
 
 // --- Pin Definitions ---
 #define ENCODER_PIN_A 2
@@ -13,122 +14,101 @@
 // --- OLED Display Setup ---
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET    -1
+#define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// --- Encoder Setup ---
+// --- Input Component Setup ---
 Encoder myEncoder(ENCODER_PIN_A, ENCODER_PIN_B);
+Bounce debouncer = Bounce();
 
-// --- Global Variables ---
-int brightness = 50; // Start at 50% brightness
-int lastDisplayedBrightness = -1; // To track when the display needs updating
-bool isLampOn = true; // Start with the lamp ON
-bool lastDisplayedState = false; // To track when the display needs updating
+// --- Global State & Settings ---
+int brightness = 50;
+int lastBrightness = brightness;
+bool isLampOn = true;
+const int rotaryScaleFactor = 2; //Set to 2 for faster response. 1 click = 2 steps.
 
-// Variables for button debouncing
-unsigned long lastDebounceTime = 0;
-unsigned long debounceDelay = 50;
-bool buttonState = HIGH;      // The debounced, stable state of the switch
-bool lastButtonState = HIGH;  // The last raw reading of the switch
+// Variables to prevent unnecessary screen updates
+int lastDisplayedBrightness = -1;
+bool lastDisplayedState = !isLampOn;
 
 void setup() {
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    for(;;); 
-  }
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        for (;;);
+    }
 
-  pinMode(ENCODER_SWITCH_PIN, INPUT_PULLUP);
-  pinMode(PWM_OUTPUT_PIN, OUTPUT);
+    debouncer.attach(ENCODER_SWITCH_PIN, INPUT_PULLUP);
+    debouncer.interval(25);
 
-  // Configure silent, ~31kHz PWM on Pin 9
-  TCCR1A = _BV(COM1A1) | _BV(WGM11);
-  TCCR1B = _BV(WGM13) | _BV(WGM12) | _BV(CS10);
-  ICR1 = 511;
-  OCR1A = 0;
+    pinMode(PWM_OUTPUT_PIN, OUTPUT);
 
-  // Set the initial encoder position to match our starting brightness
-  myEncoder.write(brightness * 4);
+    // Configure silent, ~31kHz PWM on Timer1 (Pin 9)
+    TCCR1A = _BV(COM1A1) | _BV(WGM11);
+    TCCR1B = _BV(WGM13) | _BV(WGM12) | _BV(CS10);
+    ICR1 = 511;
+    OCR1A = 0;
 
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Dimmer Ready!");
-  display.display();
-  delay(1000); 
+    myEncoder.write(brightness * rotaryScaleFactor);
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 30);
+    display.println("Lamp Ready!");
+    display.display();
+    delay(2000);
 }
 
 void loop() {
-  // --- 1. Check for Button Press (On/Off) with Debouncing ---
-  bool reading = digitalRead(ENCODER_SWITCH_PIN);
+    debouncer.update();
 
-  // If the switch state has changed, reset the debounce timer
-  if (reading != lastButtonState) {
-    lastDebounceTime = millis();
-  }
-
-  // After the debounce delay has passed, check the state again
-  if ((millis() - lastDebounceTime) > debounceDelay) {
-    // If the reading has been stable and is different from the last known stable state
-    if (reading != buttonState) {
-      buttonState = reading; // Update the stable state
-
-      // If the new stable state is a press (transition to LOW)
-      if (buttonState == LOW) {
-        isLampOn = !isLampOn; // Toggle the on/off state
-      }
+    if (debouncer.fell()) {
+        isLampOn = !isLampOn;
+        if (isLampOn) {
+            brightness = lastBrightness;
+            myEncoder.write(brightness * rotaryScaleFactor);
+        } else {
+            lastBrightness = brightness;
+        }
     }
-  }
-  lastButtonState = reading; // Save the current reading for the next loop
-
-  // --- 2. Read Encoder (only if lamp is on) ---
-  if (isLampOn) {
-    long newEncoderValue = myEncoder.read() / 4;
-    brightness = constrain(newEncoderValue, 0, 100);
-    if (brightness != newEncoderValue) {
-      myEncoder.write(brightness * 4);
-    }
-  } else {
-    // If lamp is off, ensure brightness is 0 and encoder is reset
-    brightness = 0;
-    myEncoder.write(0);
-  }
-
-  // --- 3. Update PWM and Display ---
-  // This section only runs if the state has changed, to prevent flickering
-  if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState) {
-    
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE);
 
     if (isLampOn) {
-      // --- Lamp is ON ---
-      int pwmValue;
-      // Specific check to fix the 0% glow issue
-      if (brightness == 0) {
-        pwmValue = 0; // Force output to be completely off
-      } else {
-        pwmValue = map(brightness, 0, 100, 0, 511);
-      }
-      OCR1A = pwmValue; 
-      
-      // Changed label to "Pwr:" to ensure it fits on one line
-      display.setCursor(0, 20);
-      display.print("Pwr: ");
-      display.print(brightness);
-      display.println("%");
 
+        long newEncoderValue = myEncoder.read() / rotaryScaleFactor;
+        brightness = constrain(newEncoderValue, 0, 100);
+
+        if (brightness != newEncoderValue) {
+            myEncoder.write(brightness * rotaryScaleFactor);
+        }
     } else {
-      // --- Lamp is OFF ---
-      OCR1A = 0; // Ensure PWM is off
-      
-      display.setCursor(35, 20); // Center the text
-      display.println("OFF");
+        brightness = 0;
     }
 
-    display.display();
-    lastDisplayedBrightness = brightness;
-    lastDisplayedState = isLampOn;
-  }
+    if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState) {
+        int pwmValue;
+        if (brightness == 0) {
+            pwmValue = 0;
+        } else {
+            pwmValue = map(brightness, 0, 100, 0, 511);
+        }
+        OCR1A = pwmValue;
+
+        display.clearDisplay();
+        display.setTextSize(2);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(0, 20);
+
+        if (isLampOn) {
+            display.print("Pwr: ");
+            display.print(brightness);
+            display.println("%");
+        } else {
+            display.setCursor(35, 20);
+            display.println("OFF");
+        }
+        display.display();
+
+        lastDisplayedBrightness = brightness;
+        lastDisplayedState = isLampOn;
+    }
 }
 
