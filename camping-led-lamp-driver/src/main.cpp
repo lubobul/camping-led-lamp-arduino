@@ -1,21 +1,22 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <U8g2lib.h> // The efficient display library
 #include <Encoder.h>
 #include <Bounce2.h>
+#include <IRremote.h>
 
 // --- Pin Definitions ---
 #define ENCODER_PIN_A 2
 #define ENCODER_PIN_B 3
 #define ENCODER_SWITCH_PIN 4
-#define PWM_OUTPUT_PIN 9 // Using pin D9 for safe, fast PWM
+#define PWM_OUTPUT_PIN 9
+#define IR_RECEIVE_PIN 7
 
-// --- OLED Display Setup ---
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// --- IR Code Definitions ---
+#define IR_CODE_POWER 0xE31CFF00 // The code from your remote
+
+// --- OLED Display Setup using U8g2 (Page Buffer Mode) ---
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
 // --- Input Component Setup ---
 Encoder myEncoder(ENCODER_PIN_A, ENCODER_PIN_B);
@@ -25,16 +26,24 @@ Bounce debouncer = Bounce();
 int brightness = 50;
 int lastBrightness = brightness;
 bool isLampOn = true;
-const int rotaryScaleFactor = 2; //Set to 2 for faster response. 1 click = 2 steps.
+const int rotaryScaleFactor = 2;
 
 // Variables to prevent unnecessary screen updates
 int lastDisplayedBrightness = -1;
 bool lastDisplayedState = !isLampOn;
 
+// Helper function to measure free SRAM
+int getFreeSram() {
+  extern int __heap_start, *__brkval; 
+  int v; 
+  return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval); 
+}
+
 void setup() {
-    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-        for (;;);
-    }
+    // Initialize components in the correct order to prevent conflicts
+    IrReceiver.begin(IR_RECEIVE_PIN, DISABLE_LED_FEEDBACK);
+    Serial.begin(9600);
+    u8g2.begin();
 
     debouncer.attach(ENCODER_SWITCH_PIN, INPUT_PULLUP);
     debouncer.interval(25);
@@ -48,19 +57,31 @@ void setup() {
     OCR1A = 0;
 
     myEncoder.write(brightness * rotaryScaleFactor);
-
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 30);
-    display.println("Lamp Ready!");
-    display.display();
-    delay(2000);
+    
+    // Print the final memory usage
+    Serial.print(F("Free SRAM after all setup: "));
+    Serial.println(getFreeSram());
 }
 
 void loop() {
-    debouncer.update();
+    // --- 1. Handle All Inputs ---
+    
+    // Check for IR remote signal
+    if (IrReceiver.decode()) {
+        if (IrReceiver.decodedIRData.decodedRawData == IR_CODE_POWER) {
+            isLampOn = !isLampOn;
+            if (isLampOn) {
+                brightness = lastBrightness;
+                myEncoder.write(brightness * rotaryScaleFactor);
+            } else {
+                lastBrightness = brightness;
+            }
+        }
+        IrReceiver.resume();
+    }
 
+    // Check for physical button press
+    debouncer.update();
     if (debouncer.fell()) {
         isLampOn = !isLampOn;
         if (isLampOn) {
@@ -71,8 +92,8 @@ void loop() {
         }
     }
 
+    // Read Encoder (only if lamp is on)
     if (isLampOn) {
-
         long newEncoderValue = myEncoder.read() / rotaryScaleFactor;
         brightness = constrain(newEncoderValue, 0, 100);
 
@@ -83,30 +104,36 @@ void loop() {
         brightness = 0;
     }
 
+    // --- 2. Update Outputs (PWM and Display) ---
+    // This section only runs if a state has changed, which is very efficient
     if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState) {
+        
+        // --- Update PWM ---
         int pwmValue;
         if (brightness == 0) {
-            pwmValue = 0;
+            pwmValue = 0; // Force output completely off to prevent glow
         } else {
             pwmValue = map(brightness, 0, 100, 0, 511);
         }
-        OCR1A = pwmValue;
+        OCR1A = pwmValue; // Set the PWM duty cycle
 
-        display.clearDisplay();
-        display.setTextSize(2);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 20);
+        // --- Update Display using U8g2 ---
+        u8g2.firstPage();
+        do {
+            u8g2.setFont(u8g2_font_ncenB14_tr); // A nice 14-pixel bold font
 
-        if (isLampOn) {
-            display.print("Pwr: ");
-            display.print(brightness);
-            display.println("%");
-        } else {
-            display.setCursor(35, 20);
-            display.println("OFF");
-        }
-        display.display();
+            if (isLampOn) {
+                char buffer[10];
+                sprintf(buffer, "Pwr: %d%%", brightness);
+                u8g2_uint_t textWidth = u8g2.getStrWidth(buffer);
+                u8g2.drawStr((128 - textWidth) / 2, 38, buffer); // Center the text
+            } else {
+                u8g2_uint_t textWidth = u8g2.getStrWidth("OFF");
+                u8g2.drawStr((128 - textWidth) / 2, 38, "OFF");
+            }
+        } while (u8g2.nextPage());
 
+        // Update the 'last state' variables
         lastDisplayedBrightness = brightness;
         lastDisplayedState = isLampOn;
     }
