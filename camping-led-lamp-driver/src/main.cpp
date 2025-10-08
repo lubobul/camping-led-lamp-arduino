@@ -35,8 +35,14 @@ int lastBrightness = brightness;
 bool isLampOn = true;
 const int rotaryScaleFactor = 2;
 
+// Add a flag to track if the long press has been triggered
+bool longPressActionTaken = false;
+
+
 // --- Forward Declarations for our new functions ---
 void handleInputs();
+void handleIrInputs();
+void handleRotaryEncoderInputs();
 void updateOutputs();
 void drawDisplay();
 
@@ -77,9 +83,14 @@ void loop() {
     drawDisplay();
 }
 
-// --- NEW: All input logic is now in its own function ---
+// MODIFIED: This is now a master function that calls the specific input handlers
 void handleInputs() {
-    // Check for IR remote signal
+    handleIrInputs();
+    handleRotaryEncoderInputs();
+}
+
+// --- NEW: All IR remote logic is now in its own function ---
+void handleIrInputs() {
     if (IrReceiver.decode()) {
         // Use a switch statement for clean code
         switch (IrReceiver.decodedIRData.decodedRawData) {
@@ -119,17 +130,31 @@ void handleInputs() {
 
         IrReceiver.resume();
     }
+}
 
-    // Check for physical button press
+// --- NEW: All rotary encoder logic is now in its own function ---
+void handleRotaryEncoderInputs() {
     debouncer.update();
-    if (debouncer.fell()) {
-        isLampOn = !isLampOn;
-        if (isLampOn) {
-            brightness = lastBrightness;
-            myEncoder.write(brightness * rotaryScaleFactor);
-        } else {
-            lastBrightness = brightness;
+    
+    // This block now checks for a long press while the button is held down.
+    // Check if the button is currently being held down
+    if (debouncer.read() == LOW) { 
+        // Check if the hold duration has passed 1500ms and we haven't already taken action
+        if (debouncer.duration() > 1500 && !longPressActionTaken) {
+            isLampOn = !isLampOn; // Toggle the lamp's power state
+            if (isLampOn) {
+                brightness = lastBrightness;
+                myEncoder.write(brightness * rotaryScaleFactor);
+            } else {
+                lastBrightness = brightness;
+            }
+            longPressActionTaken = true; // Set the flag so this only happens once per press
         }
+    }
+
+    // When the button is released, reset the flag for the next press
+    if (debouncer.rose()) {
+        longPressActionTaken = false;
     }
 
     // Read Encoder (only if lamp is on)
@@ -145,7 +170,7 @@ void handleInputs() {
     }
 }
 
-// --- NEW: All output logic is now in its own function ---
+// --- All output logic is in its own function ---
 void updateOutputs() {
     static int lastDisplayedBrightness = -1;
     static bool lastDisplayedState = !isLampOn;
@@ -163,7 +188,7 @@ void updateOutputs() {
     }
 }
 
-// --- NEW: All display drawing logic is now in its own function ---
+// --- All display drawing logic is in its own function ---
 void drawDisplay() {
     u8g2.firstPage();
     do {
