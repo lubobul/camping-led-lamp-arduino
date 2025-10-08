@@ -110,8 +110,8 @@ void handleIrInputs() {
                 isLampOn = !isLampOn;
                 if (isLampOn) {
                     brightness = lastBrightness;
-                    // MODIFIED: Apply brightness floor on power-on
                     if (brightness < 10) brightness = 10;
+                    currentMode = MODE_SMOOTH_DIM; // MODIFIED: Reset to main screen
                 } else {
                     lastBrightness = brightness;
                 }
@@ -154,14 +154,16 @@ void handleIrInputs() {
 void handleRotaryEncoderInputs() {
     debouncer.update();
     
-    // This is your working long-press logic. It remains untouched.
+    // --- MODIFIED: Cleaner logic for long and short press ---
+
+    // Long Press logic (while holding)
     if (debouncer.read() == LOW) { 
-        if (debouncer.duration() > 1500 && !longPressActionTaken) {
+        if (debouncer.duration() > 1000 && !longPressActionTaken) {
             isLampOn = !isLampOn; 
             if (isLampOn) {
                 brightness = lastBrightness;
-                // MODIFIED: Apply brightness floor on power-on
                 if (brightness < 10) brightness = 10;
+                currentMode = MODE_SMOOTH_DIM; // MODIFIED: Reset to main screen
                 myEncoder.write(brightness * rotaryScaleFactor);
             } else {
                 lastBrightness = brightness;
@@ -170,18 +172,16 @@ void handleRotaryEncoderInputs() {
         }
     }
 
-    // This block for short press is now appended.
-    // When the button is released, check if it was a short press.
-    if (debouncer.rose()) {
-        if (!longPressActionTaken) { // This only runs if it was NOT a long press
-            // It was a short press, so cycle to the next mode
-            currentMode = (LampMode)((currentMode + 1) % 3); // Cycles 0 -> 1 -> 2 -> 0
+    // Short Press logic (on release)
+    if (debouncer.rose()) { // Button was just released
+        if (!longPressActionTaken) { // Only if it was NOT a long press
+            currentMode = (LampMode)((currentMode + 1) % 3);
         }
-        longPressActionTaken = false; // Reset long press flag for the next cycle
+        longPressActionTaken = false; // Reset for the next press cycle
     }
 
 
-    // Read Encoder (only if lamp is on)
+    // Read Encoder turn (only if lamp is on)
     if (isLampOn) {
         long newEncoderValue = myEncoder.read() / rotaryScaleFactor;
         brightness = constrain(newEncoderValue, 0, 100);
