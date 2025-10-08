@@ -29,6 +29,14 @@ U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 Encoder myEncoder(ENCODER_PIN_A, ENCODER_PIN_B);
 Bounce debouncer = Bounce();
 
+// --- MODIFIED: State Machine Definition ---
+enum LampMode {
+  MODE_SMOOTH_DIM,
+  MODE_PRESET_SELECT,
+  MODE_STATS
+};
+LampMode currentMode = MODE_SMOOTH_DIM;
+
 // --- Global State & Settings ---
 int brightness = 50;
 int lastBrightness = brightness;
@@ -45,6 +53,11 @@ void handleIrInputs();
 void handleRotaryEncoderInputs();
 void updateOutputs();
 void drawDisplay();
+void drawSmoothDimScreen(); 
+// NEW: Forward declarations for new screens
+void drawPresetScreen();
+void drawStatsScreen();
+
 
 // Helper function to measure free SRAM
 int getFreeSram() {
@@ -69,8 +82,7 @@ void setup() {
     OCR1A = 0;
 
     myEncoder.write(brightness * rotaryScaleFactor);
-    u8g2.setFont(u8g2_font_ncenB14_tr);
-
+    
     Serial.print(F("Free SRAM after all setup: "));
     Serial.println(getFreeSram());
     
@@ -83,20 +95,26 @@ void loop() {
     drawDisplay();
 }
 
-// MODIFIED: This is now a master function that calls the specific input handlers
+// This is now a master function that calls the specific input handlers
 void handleInputs() {
     handleIrInputs();
     handleRotaryEncoderInputs();
 }
 
-// --- NEW: All IR remote logic is now in its own function ---
+// All IR remote logic is in its own function
 void handleIrInputs() {
     if (IrReceiver.decode()) {
         // Use a switch statement for clean code
         switch (IrReceiver.decodedIRData.decodedRawData) {
             case IR_CODE_POWER:
                 isLampOn = !isLampOn;
-                if (isLampOn) brightness = lastBrightness; else lastBrightness = brightness;
+                if (isLampOn) {
+                    brightness = lastBrightness;
+                    // MODIFIED: Apply brightness floor on power-on
+                    if (brightness < 10) brightness = 10;
+                } else {
+                    lastBrightness = brightness;
+                }
                 break;
             
             case IR_CODE_UP:
@@ -132,30 +150,36 @@ void handleIrInputs() {
     }
 }
 
-// --- NEW: All rotary encoder logic is now in its own function ---
+// All rotary encoder logic is in its own function
 void handleRotaryEncoderInputs() {
     debouncer.update();
     
-    // This block now checks for a long press while the button is held down.
-    // Check if the button is currently being held down
+    // This is your working long-press logic. It remains untouched.
     if (debouncer.read() == LOW) { 
-        // Check if the hold duration has passed 1500ms and we haven't already taken action
         if (debouncer.duration() > 1500 && !longPressActionTaken) {
-            isLampOn = !isLampOn; // Toggle the lamp's power state
+            isLampOn = !isLampOn; 
             if (isLampOn) {
                 brightness = lastBrightness;
+                // MODIFIED: Apply brightness floor on power-on
+                if (brightness < 10) brightness = 10;
                 myEncoder.write(brightness * rotaryScaleFactor);
             } else {
                 lastBrightness = brightness;
             }
-            longPressActionTaken = true; // Set the flag so this only happens once per press
+            longPressActionTaken = true;
         }
     }
 
-    // When the button is released, reset the flag for the next press
+    // This block for short press is now appended.
+    // When the button is released, check if it was a short press.
     if (debouncer.rose()) {
-        longPressActionTaken = false;
+        if (!longPressActionTaken) { // This only runs if it was NOT a long press
+            // It was a short press, so cycle to the next mode
+            currentMode = (LampMode)((currentMode + 1) % 3); // Cycles 0 -> 1 -> 2 -> 0
+        }
+        longPressActionTaken = false; // Reset long press flag for the next cycle
     }
+
 
     // Read Encoder (only if lamp is on)
     if (isLampOn) {
@@ -170,37 +194,85 @@ void handleRotaryEncoderInputs() {
     }
 }
 
-// --- All output logic is in its own function ---
+// All output logic is in its own function
 void updateOutputs() {
+    // We need to track the mode to force screen redraws
     static int lastDisplayedBrightness = -1;
     static bool lastDisplayedState = !isLampOn;
+    static LampMode lastUpdatedMode = (LampMode)-1;
 
     // This section only runs if a state has changed
-    if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState) {
+    if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState || currentMode != lastUpdatedMode) {
         
-        // --- Update PWM ---
+        // Update PWM
         int pwmValue = (brightness == 0) ? 0 : map(brightness, 0, 100, 0, 511);
         OCR1A = pwmValue;
 
         // Update the 'last state' variables
         lastDisplayedBrightness = brightness;
         lastDisplayedState = isLampOn;
+        lastUpdatedMode = currentMode;
     }
 }
 
-// --- All display drawing logic is in its own function ---
+// All display drawing logic is in its own function
 void drawDisplay() {
     u8g2.firstPage();
     do {
-        if (isLampOn) {
-            char buffer[10];
-            sprintf(buffer, "Pwr: %d%%", brightness);
-            u8g2_uint_t textWidth = u8g2.getStrWidth(buffer);
-            u8g2.drawStr((128 - textWidth) / 2, 38, buffer); // Center the text
-        } else {
+        // This now calls the correct drawing function based on the mode.
+        // It also handles the global "OFF" state.
+        if (!isLampOn) {
+            u8g2.setFont(u8g2_font_ncenB14_tr);
             u8g2_uint_t textWidth = u8g2.getStrWidth("OFF");
             u8g2.drawStr((128 - textWidth) / 2, 38, "OFF");
+        } else {
+            switch(currentMode) {
+                case MODE_SMOOTH_DIM:
+                    drawSmoothDimScreen();
+                    break;
+                case MODE_PRESET_SELECT:
+                    drawPresetScreen();
+                    break;
+                case MODE_STATS:
+                    drawStatsScreen();
+                    break;
+            }
         }
     } while (u8g2.nextPage());
+}
+
+// --- Function to draw the main screen ---
+void drawSmoothDimScreen() {
+    // Draw the title with a smaller font
+    u8g2.setFont(u8g2_font_7x13B_tr);
+    // MODIFIED: Center the title text
+    u8g2_uint_t textWidth = u8g2.getStrWidth("Smooth Dimming");
+    u8g2.drawStr((128 - textWidth) / 2, 12, "Smooth Dimming");
+    u8g2.drawHLine(0, 15, 128);
+
+    // Draw the main brightness value with a large font
+    u8g2.setFont(u8g2_font_ncenB14_tr);
+    char buffer[10];
+    sprintf(buffer, "%d%%", brightness);
+    textWidth = u8g2.getStrWidth(buffer);
+    u8g2.drawStr((128 - textWidth) / 2, 45, buffer);
+}
+
+// --- NEW: Function to draw the preset screen ---
+void drawPresetScreen() {
+    u8g2.setFont(u8g2_font_7x13B_tr);
+    u8g2_uint_t textWidth = u8g2.getStrWidth("Select Preset");
+    u8g2.drawStr((128 - textWidth) / 2, 12, "Select Preset");
+    u8g2.drawHLine(0, 15, 128);
+    // Content for this screen will be added in the next step
+}
+
+// --- NEW: Function to draw the stats screen ---
+void drawStatsScreen() {
+    u8g2.setFont(u8g2_font_7x13B_tr);
+    u8g2_uint_t textWidth = u8g2.getStrWidth("System Stats");
+    u8g2.drawStr((128 - textWidth) / 2, 12, "System Stats");
+    u8g2.drawHLine(0, 15, 128);
+    // Content for this screen will be added in the next step
 }
 
