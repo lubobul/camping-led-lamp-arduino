@@ -29,7 +29,7 @@ U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 Encoder myEncoder(ENCODER_PIN_A, ENCODER_PIN_B);
 Bounce debouncer = Bounce();
 
-// --- MODIFIED: State Machine Definition ---
+// --- State Machine Definition ---
 enum LampMode {
   MODE_SMOOTH_DIM,
   MODE_PRESET_SELECT,
@@ -42,28 +42,30 @@ int brightness = 50;
 int lastBrightness = brightness;
 bool isLampOn = true;
 const int rotaryScaleFactor = 2;
-
-// Add a flag to track if the long press has been triggered
 bool longPressActionTaken = false;
 
+// Variables for preset menu
+int highlightedPreset = 0;
+// Presets adjusted for better perceived brightness steps
+const int presets[] = {10, 25, 50, 100};
 
-// --- Forward Declarations for our new functions ---
+
+// --- Forward Declarations ---
 void handleInputs();
 void handleIrInputs();
 void handleRotaryEncoderInputs();
 void updateOutputs();
 void drawDisplay();
-void drawSmoothDimScreen(); 
-// NEW: Forward declarations for new screens
+void drawSmoothDimScreen();
 void drawPresetScreen();
 void drawStatsScreen();
 
 
 // Helper function to measure free SRAM
 int getFreeSram() {
-  extern int __heap_start, *__brkval; 
-  int v; 
-  return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval); 
+  extern int __heap_start, *__brkval;
+  int v;
+  return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval);
 }
 
 void setup() {
@@ -82,67 +84,52 @@ void setup() {
     OCR1A = 0;
 
     myEncoder.write(brightness * rotaryScaleFactor);
-    
+
     Serial.print(F("Free SRAM after all setup: "));
     Serial.println(getFreeSram());
-    
+
 }
 
-// The main loop is now beautifully simple
 void loop() {
     handleInputs();
     updateOutputs();
     drawDisplay();
 }
 
-// This is now a master function that calls the specific input handlers
 void handleInputs() {
     handleIrInputs();
     handleRotaryEncoderInputs();
 }
 
-// All IR remote logic is in its own function
 void handleIrInputs() {
     if (IrReceiver.decode()) {
-        // Use a switch statement for clean code
         switch (IrReceiver.decodedIRData.decodedRawData) {
             case IR_CODE_POWER:
                 isLampOn = !isLampOn;
                 if (isLampOn) {
                     brightness = lastBrightness;
                     if (brightness < 10) brightness = 10;
-                    currentMode = MODE_SMOOTH_DIM; // MODIFIED: Reset to main screen
+                    currentMode = MODE_SMOOTH_DIM;
                 } else {
                     lastBrightness = brightness;
                 }
                 break;
-            
+
             case IR_CODE_UP:
-                if (isLampOn) brightness += 5; // Increase brightness by 5
+                if (isLampOn) brightness += 5;
                 break;
 
             case IR_CODE_DOWN:
-                if (isLampOn) brightness -= 5; // Decrease brightness by 5
+                if (isLampOn) brightness -= 5;
                 break;
 
-            case IR_CODE_PRESET_1:
-                if (isLampOn) brightness = 10;
-                break;
-            
-            case IR_CODE_PRESET_2:
-                if (isLampOn) brightness = 30;
-                break;
-
-            case IR_CODE_PRESET_3:
-                if (isLampOn) brightness = 70;
-                break;
-
-            case IR_CODE_PRESET_4:
-                if (isLampOn) brightness = 100;
-                break;
+            // Remote presets now match the new values
+            case IR_CODE_PRESET_1: if (isLampOn) brightness = 10; break;
+            case IR_CODE_PRESET_2: if (isLampOn) brightness = 25; break;
+            case IR_CODE_PRESET_3: if (isLampOn) brightness = 50; break;
+            case IR_CODE_PRESET_4: if (isLampOn) brightness = 100; break;
         }
-        
-        // After any IR command that changes brightness, constrain and update encoder
+
         brightness = constrain(brightness, 0, 100);
         myEncoder.write(brightness * rotaryScaleFactor);
 
@@ -150,77 +137,93 @@ void handleIrInputs() {
     }
 }
 
-// All rotary encoder logic is in its own function
 void handleRotaryEncoderInputs() {
     debouncer.update();
-    
-    // --- MODIFIED: Cleaner logic for long and short press ---
 
-    // Long Press logic (while holding)
-    if (debouncer.read() == LOW) { 
+    // Long press logic is now conditional based on the current mode
+    if (debouncer.read() == LOW) {
         if (debouncer.duration() > 1000 && !longPressActionTaken) {
-            isLampOn = !isLampOn; 
-            if (isLampOn) {
-                brightness = lastBrightness;
-                if (brightness < 10) brightness = 10;
-                currentMode = MODE_SMOOTH_DIM; // MODIFIED: Reset to main screen
+            if (currentMode == MODE_PRESET_SELECT) {
+                // In preset mode, long press SELECTS the preset
+                brightness = presets[highlightedPreset];
+                currentMode = MODE_SMOOTH_DIM;
                 myEncoder.write(brightness * rotaryScaleFactor);
             } else {
-                lastBrightness = brightness;
+                // In other modes, long press is for On/Off
+                isLampOn = !isLampOn;
+                if (isLampOn) {
+                    brightness = lastBrightness;
+                    if (brightness < 10) brightness = 10;
+                    currentMode = MODE_SMOOTH_DIM;
+                    myEncoder.write(brightness * rotaryScaleFactor);
+                } else {
+                    lastBrightness = brightness;
+                }
             }
             longPressActionTaken = true;
         }
     }
 
-    // Short Press logic (on release)
-    if (debouncer.rose()) { // Button was just released
-        if (!longPressActionTaken) { // Only if it was NOT a long press
-            currentMode = (LampMode)((currentMode + 1) % 3);
+    if (debouncer.rose()) {
+        if (!longPressActionTaken) { // This only runs if it was NOT a long press (i.e., a short press)
+            currentMode = (LampMode)((currentMode + 1) % 3); // Cycle through the 3 modes
+
+            // Synchronize the encoder with the new mode's context
+            switch(currentMode) {
+                case MODE_SMOOTH_DIM:
+                    myEncoder.write(brightness * rotaryScaleFactor);
+                    break;
+                case MODE_PRESET_SELECT:
+                    myEncoder.write(highlightedPreset * 4);
+                    break;
+                case MODE_STATS:
+                    break;
+            }
         }
-        longPressActionTaken = false; // Reset for the next press cycle
+        longPressActionTaken = false; // Reset long press flag for the next cycle
     }
 
 
-    // Read Encoder turn (only if lamp is on)
     if (isLampOn) {
-        long newEncoderValue = myEncoder.read() / rotaryScaleFactor;
-        brightness = constrain(newEncoderValue, 0, 100);
-
-        if (brightness != newEncoderValue) {
-            myEncoder.write(brightness * rotaryScaleFactor);
+        long newEncoderValue;
+        switch(currentMode) {
+            case MODE_SMOOTH_DIM:
+                newEncoderValue = myEncoder.read() / rotaryScaleFactor;
+                brightness = constrain(newEncoderValue, 0, 100);
+                if (brightness != newEncoderValue) myEncoder.write(brightness * rotaryScaleFactor);
+                break;
+            case MODE_PRESET_SELECT:
+                newEncoderValue = myEncoder.read() / 4;
+                highlightedPreset = (newEncoderValue % 4 + 4) % 4;
+                break;
+            case MODE_STATS:
+                break;
         }
     } else {
         brightness = 0;
     }
 }
 
-// All output logic is in its own function
 void updateOutputs() {
-    // We need to track the mode to force screen redraws
     static int lastDisplayedBrightness = -1;
     static bool lastDisplayedState = !isLampOn;
     static LampMode lastUpdatedMode = (LampMode)-1;
 
-    // This section only runs if a state has changed
     if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState || currentMode != lastUpdatedMode) {
-        
-        // Update PWM
-        int pwmValue = (brightness == 0) ? 0 : map(brightness, 0, 100, 0, 511);
+
+        int pwmValue = (isLampOn) ? map(brightness, 0, 100, 0, 511) : 0;
+        if(brightness == 0 && isLampOn) pwmValue = 0;
         OCR1A = pwmValue;
 
-        // Update the 'last state' variables
         lastDisplayedBrightness = brightness;
         lastDisplayedState = isLampOn;
         lastUpdatedMode = currentMode;
     }
 }
 
-// All display drawing logic is in its own function
 void drawDisplay() {
     u8g2.firstPage();
     do {
-        // This now calls the correct drawing function based on the mode.
-        // It also handles the global "OFF" state.
         if (!isLampOn) {
             u8g2.setFont(u8g2_font_ncenB14_tr);
             u8g2_uint_t textWidth = u8g2.getStrWidth("OFF");
@@ -241,16 +244,12 @@ void drawDisplay() {
     } while (u8g2.nextPage());
 }
 
-// --- Function to draw the main screen ---
 void drawSmoothDimScreen() {
-    // Draw the title with a smaller font
     u8g2.setFont(u8g2_font_7x13B_tr);
-    // MODIFIED: Center the title text
     u8g2_uint_t textWidth = u8g2.getStrWidth("Smooth Dimming");
     u8g2.drawStr((128 - textWidth) / 2, 12, "Smooth Dimming");
     u8g2.drawHLine(0, 15, 128);
 
-    // Draw the main brightness value with a large font
     u8g2.setFont(u8g2_font_ncenB14_tr);
     char buffer[10];
     sprintf(buffer, "%d%%", brightness);
@@ -258,21 +257,38 @@ void drawSmoothDimScreen() {
     u8g2.drawStr((128 - textWidth) / 2, 45, buffer);
 }
 
-// --- NEW: Function to draw the preset screen ---
 void drawPresetScreen() {
     u8g2.setFont(u8g2_font_7x13B_tr);
     u8g2_uint_t textWidth = u8g2.getStrWidth("Select Preset");
     u8g2.drawStr((128 - textWidth) / 2, 12, "Select Preset");
     u8g2.drawHLine(0, 15, 128);
-    // Content for this screen will be added in the next step
+
+    for (int i = 0; i < 4; i++) {
+        char buffer[5];
+        sprintf(buffer, "%d%%", presets[i]);
+        u8g2_uint_t textWidth = u8g2.getStrWidth(buffer);
+        int xPos = 30 * i + 5;
+
+        if (i == highlightedPreset) {
+            u8g2.drawBox(xPos, 25, textWidth + 6, 15);
+            u8g2.setDrawColor(0);
+            u8g2.drawStr(xPos + 3, 38, buffer);
+            u8g2.setDrawColor(1);
+        } else {
+            u8g2.drawStr(xPos + 3, 38, buffer);
+        }
+    }
+    // MODIFIED: Helper text font changed for better readability and parentheses removed.
+    u8g2.setFont(u8g2_font_6x12_tr);
+    const char* helpText = F("Long-Press to Select");
+    textWidth = u8g2.getStrWidth(helpText);
+    u8g2.drawStr((128 - textWidth) / 2, 58, helpText);
 }
 
-// --- NEW: Function to draw the stats screen ---
 void drawStatsScreen() {
     u8g2.setFont(u8g2_font_7x13B_tr);
     u8g2_uint_t textWidth = u8g2.getStrWidth("System Stats");
     u8g2.drawStr((128 - textWidth) / 2, 12, "System Stats");
     u8g2.drawHLine(0, 15, 128);
-    // Content for this screen will be added in the next step
 }
 
