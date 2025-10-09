@@ -204,44 +204,52 @@ void handleRotaryEncoderInputs() {
     }
 }
 
+// MODIFIED: This function is now very simple. Its only job is to update the PWM.
 void updateOutputs() {
+    int pwmValue = (isLampOn) ? map(brightness, 0, 100, 0, 511) : 0;
+    if(brightness == 0 && isLampOn) pwmValue = 0;
+    OCR1A = pwmValue;
+}
+
+// MODIFIED: This function now contains the logic to prevent unnecessary redraws.
+void drawDisplay() {
+    // These static variables will remember the last state that was drawn to the screen
     static int lastDisplayedBrightness = -1;
     static bool lastDisplayedState = !isLampOn;
     static LampMode lastUpdatedMode = (LampMode)-1;
+    static int lastHighlightedPreset = -1;
 
-    if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState || currentMode != lastUpdatedMode) {
+    // The robust 'if' condition we designed.
+    if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState || currentMode != lastUpdatedMode || highlightedPreset != lastHighlightedPreset) {
+        
+        // --- The slow drawing code is now inside the 'if' block ---
+        u8g2.firstPage();
+        do {
+            if (!isLampOn) {
+                u8g2.setFont(u8g2_font_ncenB14_tr);
+                u8g2_uint_t textWidth = u8g2.getStrWidth("OFF");
+                u8g2.drawStr((128 - textWidth) / 2, 38, "OFF");
+            } else {
+                switch(currentMode) {
+                    case MODE_SMOOTH_DIM:
+                        drawSmoothDimScreen();
+                        break;
+                    case MODE_PRESET_SELECT:
+                        drawPresetScreen();
+                        break;
+                    case MODE_STATS:
+                        drawStatsScreen();
+                        break;
+                }
+            }
+        } while (u8g2.nextPage());
 
-        int pwmValue = (isLampOn) ? map(brightness, 0, 100, 0, 511) : 0;
-        if(brightness == 0 && isLampOn) pwmValue = 0;
-        OCR1A = pwmValue;
-
+        // Update all the 'last state' variables after a successful redraw
         lastDisplayedBrightness = brightness;
         lastDisplayedState = isLampOn;
         lastUpdatedMode = currentMode;
+        lastHighlightedPreset = highlightedPreset;
     }
-}
-
-void drawDisplay() {
-    u8g2.firstPage();
-    do {
-        if (!isLampOn) {
-            u8g2.setFont(u8g2_font_ncenB14_tr);
-            u8g2_uint_t textWidth = u8g2.getStrWidth("OFF");
-            u8g2.drawStr((128 - textWidth) / 2, 38, "OFF");
-        } else {
-            switch(currentMode) {
-                case MODE_SMOOTH_DIM:
-                    drawSmoothDimScreen();
-                    break;
-                case MODE_PRESET_SELECT:
-                    drawPresetScreen();
-                    break;
-                case MODE_STATS:
-                    drawStatsScreen();
-                    break;
-            }
-        }
-    } while (u8g2.nextPage());
 }
 
 void drawSmoothDimScreen() {
@@ -278,9 +286,9 @@ void drawPresetScreen() {
             u8g2.drawStr(xPos + 3, 38, buffer);
         }
     }
-    // MODIFIED: Helper text font changed for better readability and parentheses removed.
+
     u8g2.setFont(u8g2_font_6x12_tr);
-    const char* helpText = F("Long-Press to Select");
+    const char* helpText = "Long-Press to Select";
     textWidth = u8g2.getStrWidth(helpText);
     u8g2.drawStr((128 - textWidth) / 2, 58, helpText);
 }
@@ -290,5 +298,8 @@ void drawStatsScreen() {
     u8g2_uint_t textWidth = u8g2.getStrWidth("System Stats");
     u8g2.drawStr((128 - textWidth) / 2, 12, "System Stats");
     u8g2.drawHLine(0, 15, 128);
-}
 
+    // MODIFIED: Added placeholder text for the stats
+    u8g2.drawStr(0, 35, "Batt: --% (-- V)");
+    u8g2.drawStr(0, 55, "Temp: -- C");
+}
