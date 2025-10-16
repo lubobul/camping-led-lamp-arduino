@@ -22,11 +22,6 @@
 #define IR_CODE_PRESET_3 0xB847FF00
 #define IR_CODE_PRESET_4 0xBB44FF00
 
-// --- MODIFIED: ADC Calibration Constants ---
-// These are the real-world values you measured with the calibration sketch.
-const int ADC_LOW = 684;  // Raw ADC value corresponding to 6.4V
-const int ADC_HIGH = 895; // Raw ADC value corresponding to 8.4V (adjusted for headroom)
-
 // --- OLED Display Setup ---
 U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
@@ -49,9 +44,7 @@ bool isLampOn = true;
 const int rotaryScaleFactor = 2;
 bool longPressActionTaken = false;
 
-// Variables for preset menu
 int highlightedPreset = 0;
-// Presets adjusted for better perceived brightness steps
 const int presets[] = {10, 25, 50, 100};
 
 // Variables for battery monitoring
@@ -68,6 +61,7 @@ void drawSmoothDimScreen();
 void drawPresetScreen();
 void drawStatsScreen();
 void updateBatteryStats();
+long readVcc(); // MODIFIED: New function to measure the 5V rail
 
 // Helper function to measure free SRAM
 int getFreeSram() {
@@ -81,7 +75,8 @@ void setup() {
     Serial.begin(9600);
     u8g2.begin();
 
-    analogReference(INTERNAL);
+    // MODIFIED: Use the default 5V VCC as the ADC reference
+    analogReference(DEFAULT);
 
     debouncer.attach(ENCODER_SWITCH_PIN, INPUT_PULLUP);
     debouncer.interval(25);
@@ -192,32 +187,37 @@ void handleRotaryEncoderInputs() {
     }
 }
 
-// MODIFIED: This function now uses the new calibration constants.
+// MODIFIED: This function now uses the new ratiometric method.
 void updateBatteryStats() {
     static unsigned long lastBatteryCheckTime = 0;
     if (millis() - lastBatteryCheckTime > 2000) {
         lastBatteryCheckTime = millis();
 
+        // Step 1: Measure the true VCC voltage in millivolts
+        long vcc_mV = readVcc();
+
+        // Step 2: Read the averaged value from our voltage divider
         long rawValueSum = 0;
         const int numReadings = 10;
         for (int i = 0; i < numReadings; i++) {
             rawValueSum += analogRead(VOLTAGE_SENSE_PIN);
         }
         float averageRawValue = (float)rawValueSum / numReadings;
+
+        // Step 3: Calculate the true voltage at the pin
+        // V_pin = (ADC reading / ADC max) * Vcc
+        float pinVoltage = (averageRawValue / 1023.0) * (vcc_mV / 1000.0);
+
+        // Step 4: Convert back to the real battery voltage
+        // Divider ratio for 68k/10k is (68+10)/10 = 7.8
+        batteryVoltage = pinVoltage * 7.8;
         
-        // --- This is the new, calibrated logic ---
-        // Map the measured raw ADC range to the known voltage range (6.4V to 8.4V)
-        // We use 640 and 840 to do integer math before dividing to a float.
-        batteryVoltage = map(averageRawValue, ADC_LOW, ADC_HIGH, 640, 840) / 100.0;
-        
-        // Map the same raw ADC range to a 0-100% scale
-        batteryPercent = map(averageRawValue, ADC_LOW, ADC_HIGH, 0, 100);
-        
-        // Constrain the final values to prevent out-of-bounds results
-        batteryVoltage = constrain(batteryVoltage, 6.4, 8.4);
+        // Step 5: Calculate percentage
+        batteryPercent = map(batteryVoltage * 100, 640, 840, 0, 100);
         batteryPercent = constrain(batteryPercent, 0, 100);
     }
 }
+
 
 void updateOutputs() {
     int pwmValue = (isLampOn) ? map(brightness, 0, 100, 0, 511) : 0;
@@ -302,7 +302,6 @@ void drawStatsScreen() {
     u8g2.drawStr((128 - textWidth) / 2, 12, "System Stats");
     u8g2.drawHLine(0, 15, 128);
 
-    // This now displays the live, calibrated battery data
     char voltageString[6];
     dtostrf(batteryVoltage, 4, 2, voltageString);
     char buffer[20];
@@ -311,3 +310,19 @@ void drawStatsScreen() {
 
     u8g2.drawStr(0, 55, "Temp: -- C");
 }
+
+// MODIFIED: This is the new function to measure VCC
+long readVcc() {
+  // Selects the 1.1V internal reference as the ADC input.
+  // The ADC reference is still the default VCC.
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Start conversion
+  while (bit_is_set(ADCSRA, ADSC)); // Wait for conversion to complete
+  long result = ADC;
+  // Calculate Vcc in millivolts
+  // 1.1V * 1023 ADC steps = 1125.3. We use 1125300L for integer math.
+  result = (1125300L / result);
+  return result; // Vcc in millivolts
+}
+
