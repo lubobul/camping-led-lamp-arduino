@@ -61,7 +61,7 @@ void drawSmoothDimScreen();
 void drawPresetScreen();
 void drawStatsScreen();
 void updateBatteryStats();
-long readVcc(); // MODIFIED: New function to measure the 5V rail
+long readVcc();
 
 // Helper function to measure free SRAM
 int getFreeSram() {
@@ -75,7 +75,6 @@ void setup() {
     Serial.begin(9600);
     u8g2.begin();
 
-    // MODIFIED: Use the default 5V VCC as the ADC reference
     analogReference(DEFAULT);
 
     debouncer.attach(ENCODER_SWITCH_PIN, INPUT_PULLUP);
@@ -187,7 +186,6 @@ void handleRotaryEncoderInputs() {
     }
 }
 
-// MODIFIED: This function now uses the new ratiometric method.
 void updateBatteryStats() {
     static unsigned long lastBatteryCheckTime = 0;
     if (millis() - lastBatteryCheckTime > 2000) {
@@ -213,7 +211,7 @@ void updateBatteryStats() {
         batteryVoltage = pinVoltage * 7.8;
         
         // Step 5: Calculate percentage
-        batteryPercent = map(batteryVoltage * 100, 640, 840, 0, 100);
+        batteryPercent = map(batteryVoltage * 100, 640, 830, 0, 100);
         batteryPercent = constrain(batteryPercent, 0, 100);
     }
 }
@@ -311,7 +309,6 @@ void drawStatsScreen() {
     u8g2.drawStr(0, 55, "Temp: -- C");
 }
 
-// MODIFIED: This is the new function to measure VCC
 long readVcc() {
   // Selects the 1.1V internal reference as the ADC input.
   // The ADC reference is still the default VCC.
