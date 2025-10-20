@@ -4,6 +4,9 @@
 #include <Encoder.h>
 #include <Bounce2.h>
 #include <IRremote.h>
+// NEW: Include libraries for the temperature sensor
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 // --- Pin Definitions ---
 #define ENCODER_PIN_A 2
@@ -12,6 +15,9 @@
 #define PWM_OUTPUT_PIN 9
 #define IR_RECEIVE_PIN 7
 #define VOLTAGE_SENSE_PIN A1
+// NEW: Pin for the DS18B20 temperature sensor
+#define ONEWIRE_BUS_PIN 8 
+
 
 // --- IR Code Definitions ---
 #define IR_CODE_POWER 0xE31CFF00
@@ -22,12 +28,18 @@
 #define IR_CODE_PRESET_3 0xB847FF00
 #define IR_CODE_PRESET_4 0xBB44FF00
 
+
 // --- OLED Display Setup ---
 U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 // --- Input Component Setup ---
 Encoder myEncoder(ENCODER_PIN_A, ENCODER_PIN_B);
 Bounce debouncer = Bounce();
+
+// NEW: Setup for the temperature sensor
+OneWire oneWire(ONEWIRE_BUS_PIN);
+DallasTemperature sensors(&oneWire);
+
 
 // --- State Machine Definition ---
 enum LampMode {
@@ -51,6 +63,10 @@ const int presets[] = {10, 25, 50, 100};
 float batteryVoltage = 0.0;
 int batteryPercent = 0;
 
+// NEW: Variable for temperature monitoring
+float ledTemperature = 0.0;
+
+
 // --- Forward Declarations ---
 void handleInputs();
 void handleIrInputs();
@@ -62,6 +78,9 @@ void drawPresetScreen();
 void drawStatsScreen();
 void updateBatteryStats();
 long readVcc();
+// NEW: Forward declaration for temperature function
+void updateTemperature();
+
 
 // Helper function to measure free SRAM
 int getFreeSram() {
@@ -80,6 +99,11 @@ void setup() {
     debouncer.attach(ENCODER_SWITCH_PIN, INPUT_PULLUP);
     debouncer.interval(25);
 
+    // NEW: Initialize the temperature sensor
+    sensors.begin();
+    // NEW: Set the sensor to non-blocking mode
+    sensors.setWaitForConversion(false);
+
     pinMode(PWM_OUTPUT_PIN, OUTPUT);
 
     TCCR1A = _BV(COM1A1) | _BV(WGM11);
@@ -94,10 +118,31 @@ void setup() {
 }
 
 void loop() {
+    // --- Fast Loop (runs thousands of times per second) ---
+    // These functions are always called to ensure maximum responsiveness.
     handleInputs();
-    updateBatteryStats();
     updateOutputs();
     drawDisplay();
+
+    // --- MODIFIED: A proper, non-interfering scheduler for slow tasks ---
+    static unsigned long lastBatteryCheckTime = 0;
+    static unsigned long lastTempCheckTime = 1000; // Offset by 1 second to prevent collision
+
+    const unsigned long SENSOR_UPDATE_INTERVAL = 2000; // 2 seconds
+
+    unsigned long currentTime = millis();
+
+    // Check and run the battery update task
+    if (currentTime - lastBatteryCheckTime > SENSOR_UPDATE_INTERVAL) {
+        lastBatteryCheckTime = currentTime;
+        updateBatteryStats();
+    }
+
+    // Check and run the temperature update task on a different, offset schedule
+    if (currentTime - lastTempCheckTime > SENSOR_UPDATE_INTERVAL) {
+        lastTempCheckTime = currentTime;
+        updateTemperature(); 
+    }
 }
 
 void handleInputs() {
@@ -187,33 +232,28 @@ void handleRotaryEncoderInputs() {
 }
 
 void updateBatteryStats() {
-    static unsigned long lastBatteryCheckTime = 0;
-    if (millis() - lastBatteryCheckTime > 2000) {
-        lastBatteryCheckTime = millis();
+    // Step 1: Measure the true VCC voltage in millivolts
+    long vcc_mV = readVcc();
 
-        // Step 1: Measure the true VCC voltage in millivolts
-        long vcc_mV = readVcc();
-
-        // Step 2: Read the averaged value from our voltage divider
-        long rawValueSum = 0;
-        const int numReadings = 10;
-        for (int i = 0; i < numReadings; i++) {
-            rawValueSum += analogRead(VOLTAGE_SENSE_PIN);
-        }
-        float averageRawValue = (float)rawValueSum / numReadings;
-
-        // Step 3: Calculate the true voltage at the pin
-        // V_pin = (ADC reading / ADC max) * Vcc
-        float pinVoltage = (averageRawValue / 1023.0) * (vcc_mV / 1000.0);
-
-        // Step 4: Convert back to the real battery voltage
-        // Divider ratio for 68k/10k is (68+10)/10 = 7.8
-        batteryVoltage = pinVoltage * 7.8;
-        
-        // Step 5: Calculate percentage
-        batteryPercent = map(batteryVoltage * 100, 640, 830, 0, 100);
-        batteryPercent = constrain(batteryPercent, 0, 100);
+    // Step 2: Read the averaged value from our voltage divider
+    long rawValueSum = 0;
+    const int numReadings = 10;
+    for (int i = 0; i < numReadings; i++) {
+        rawValueSum += analogRead(VOLTAGE_SENSE_PIN);
     }
+    float averageRawValue = (float)rawValueSum / numReadings;
+
+    // Step 3: Calculate the true voltage at the pin
+    // V_pin = (ADC reading / ADC max) * Vcc
+    float pinVoltage = (averageRawValue / 1023.0) * (vcc_mV / 1000.0);
+
+    // Step 4: Convert back to the real battery voltage
+    // Divider ratio for 68k/10k is (68+10)/10 = 7.8
+    batteryVoltage = pinVoltage * 7.8;
+    
+    // Step 5: Calculate percentage
+    batteryPercent = map(batteryVoltage * 100, 640, 830, 0, 100);
+    batteryPercent = constrain(batteryPercent, 0, 100);
 }
 
 
@@ -229,8 +269,14 @@ void drawDisplay() {
     static LampMode lastUpdatedMode = (LampMode)-1;
     static int lastHighlightedPreset = -1;
     static int lastBatteryPercent = -1;
+    static float lastTemperature = -999; 
 
-    if (brightness != lastDisplayedBrightness || isLampOn != lastDisplayedState || currentMode != lastUpdatedMode || highlightedPreset != lastHighlightedPreset || batteryPercent != lastBatteryPercent) {
+    if (brightness != lastDisplayedBrightness ||
+         isLampOn != lastDisplayedState ||
+          currentMode != lastUpdatedMode ||
+           highlightedPreset != lastHighlightedPreset ||
+            batteryPercent != lastBatteryPercent ||
+             ledTemperature != lastTemperature) {
         u8g2.firstPage();
         do {
             if (!isLampOn) {
@@ -251,6 +297,7 @@ void drawDisplay() {
         lastUpdatedMode = currentMode;
         lastHighlightedPreset = highlightedPreset;
         lastBatteryPercent = batteryPercent;
+        lastTemperature = ledTemperature; 
     }
 }
 
@@ -306,20 +353,39 @@ void drawStatsScreen() {
     sprintf(buffer, "Batt: %d%% (%sV)", batteryPercent, voltageString);
     u8g2.drawStr(0, 35, buffer);
 
-    u8g2.drawStr(0, 55, "Temp: -- C");
+    char tempString[6];
+    dtostrf(ledTemperature, 4, 1, tempString);
+    sprintf(buffer, "Temp: %s C", tempString);
+    u8g2.drawStr(0, 55, buffer);
 }
 
 long readVcc() {
-  // Selects the 1.1V internal reference as the ADC input.
-  // The ADC reference is still the default VCC.
   ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
-  delay(2); // Wait for Vref to settle
-  ADCSRA |= _BV(ADSC); // Start conversion
-  while (bit_is_set(ADCSRA, ADSC)); // Wait for conversion to complete
+  delay(2);
+  ADCSRA |= _BV(ADSC);
+  while (bit_is_set(ADCSRA, ADSC));
   long result = ADC;
-  // Calculate Vcc in millivolts
-  // 1.1V * 1023 ADC steps = 1125.3. We use 1125300L for integer math.
   result = (1125300L / result);
-  return result; // Vcc in millivolts
+  return result;
+}
+
+void updateTemperature() {
+    static unsigned long lastTempRequestTime = 0;
+    static bool conversionStarted = false;
+
+    if (!conversionStarted) {
+        sensors.requestTemperatures();
+        conversionStarted = true;
+        lastTempRequestTime = millis();
+    }
+    
+    if (conversionStarted && millis() - lastTempRequestTime > 800) {
+        float tempC = sensors.getTempCByIndex(0);
+
+        if (tempC != DEVICE_DISCONNECTED_C) {
+            ledTemperature = tempC;
+        }
+        conversionStarted = false;
+    }
 }
 
