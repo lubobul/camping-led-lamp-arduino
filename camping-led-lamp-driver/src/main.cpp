@@ -41,13 +41,23 @@ OneWire oneWire(ONEWIRE_BUS_PIN);
 DallasTemperature sensors(&oneWire);
 
 
-// --- State Machine Definition ---
+// --- UI State Machine Definition ---
 enum LampMode {
   MODE_SMOOTH_DIM,
   MODE_PRESET_SELECT,
   MODE_STATS
 };
 LampMode currentMode = MODE_SMOOTH_DIM;
+
+// NEW: Master Operational State Machine Definition
+enum OperationalState {
+  STATE_OPERATING,
+  STATE_CHARGING,
+  STATE_LOW_BATTERY,
+  STATE_OVERHEAT
+};
+OperationalState currentState = STATE_OPERATING;
+
 
 // --- Global State & Settings ---
 int brightness = 50;
@@ -81,17 +91,9 @@ long readVcc();
 // NEW: Forward declaration for temperature function
 void updateTemperature();
 
-
-// Helper function to measure free SRAM
-int getFreeSram() {
-  extern int __heap_start, *__brkval;
-  int v;
-  return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval);
-}
-
 void setup() {
     IrReceiver.begin(IR_RECEIVE_PIN, DISABLE_LED_FEEDBACK);
-    Serial.begin(9600);
+    // MODIFIED: Serial communication removed
     u8g2.begin();
 
     analogReference(DEFAULT);
@@ -113,35 +115,51 @@ void setup() {
 
     myEncoder.write(brightness * rotaryScaleFactor);
 
-    Serial.print(F("Free SRAM after all setup: "));
-    Serial.println(getFreeSram());
+    // MODIFIED: Serial communication removed
 }
 
 void loop() {
-    // --- Fast Loop (runs thousands of times per second) ---
-    // These functions are always called to ensure maximum responsiveness.
-    handleInputs();
-    updateOutputs();
-    drawDisplay();
+    // MODIFIED: Main loop is now controlled by the master state machine
+    switch (currentState) {
+        case STATE_OPERATING:
+            // --- Fast Loop (runs thousands of times per second) ---
+            // These functions are always called to ensure maximum responsiveness.
+            handleInputs();
+            updateOutputs();
+            drawDisplay();
 
-    // --- MODIFIED: A proper, non-interfering scheduler for slow tasks ---
-    static unsigned long lastBatteryCheckTime = 0;
-    static unsigned long lastTempCheckTime = 1000; // Offset by 1 second to prevent collision
+            // --- A proper, non-interfering scheduler for slow tasks ---
+            static unsigned long lastBatteryCheckTime = 0;
+            static unsigned long lastTempCheckTime = 1000; // Offset by 1 second to prevent collision
 
-    const unsigned long SENSOR_UPDATE_INTERVAL = 2000; // 2 seconds
+            const unsigned long SENSOR_UPDATE_INTERVAL = 2000; // 2 seconds
 
-    unsigned long currentTime = millis();
+            unsigned long currentTime = millis();
 
-    // Check and run the battery update task
-    if (currentTime - lastBatteryCheckTime > SENSOR_UPDATE_INTERVAL) {
-        lastBatteryCheckTime = currentTime;
-        updateBatteryStats();
-    }
+            // Check and run the battery update task
+            if (currentTime - lastBatteryCheckTime > SENSOR_UPDATE_INTERVAL) {
+                lastBatteryCheckTime = currentTime;
+                updateBatteryStats();
+            }
 
-    // Check and run the temperature update task on a different, offset schedule
-    if (currentTime - lastTempCheckTime > SENSOR_UPDATE_INTERVAL) {
-        lastTempCheckTime = currentTime;
-        updateTemperature(); 
+            // Check and run the temperature update task on a different, offset schedule
+            if (currentTime - lastTempCheckTime > SENSOR_UPDATE_INTERVAL) {
+                lastTempCheckTime = currentTime;
+                updateTemperature(); 
+            }
+            break;
+
+        case STATE_CHARGING:
+            // Placeholder for charging logic
+            break;
+
+        case STATE_LOW_BATTERY:
+            // Placeholder for low battery logic
+            break;
+
+        case STATE_OVERHEAT:
+            // Placeholder for overheat logic
+            break;
     }
 }
 
@@ -269,8 +287,10 @@ void drawDisplay() {
     static LampMode lastUpdatedMode = (LampMode)-1;
     static int lastHighlightedPreset = -1;
     static int lastBatteryPercent = -1;
+    // NEW: Track temperature for redraws
     static float lastTemperature = -999; 
 
+    // NEW: The 'if' condition now includes the temperature
     if (brightness != lastDisplayedBrightness ||
          isLampOn != lastDisplayedState ||
           currentMode != lastUpdatedMode ||
@@ -297,6 +317,7 @@ void drawDisplay() {
         lastUpdatedMode = currentMode;
         lastHighlightedPreset = highlightedPreset;
         lastBatteryPercent = batteryPercent;
+        // NEW: Update the last known temperature
         lastTemperature = ledTemperature; 
     }
 }
@@ -353,6 +374,7 @@ void drawStatsScreen() {
     sprintf(buffer, "Batt: %d%% (%sV)", batteryPercent, voltageString);
     u8g2.drawStr(0, 35, buffer);
 
+    // NEW: Display the live temperature
     char tempString[6];
     dtostrf(ledTemperature, 4, 1, tempString);
     sprintf(buffer, "Temp: %s C", tempString);
@@ -360,25 +382,34 @@ void drawStatsScreen() {
 }
 
 long readVcc() {
+  // Selects the 1.1V internal reference as the ADC input.
+  // The ADC reference is still the default VCC.
   ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
-  delay(2);
-  ADCSRA |= _BV(ADSC);
-  while (bit_is_set(ADCSRA, ADSC));
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Start conversion
+  while (bit_is_set(ADCSRA, ADSC)); // Wait for conversion to complete
   long result = ADC;
+  // Calculate Vcc in millivolts
+  // 1.1V * 1023 ADC steps = 1125.3. We use 1125300L for integer math.
   result = (1125300L / result);
-  return result;
+  return result; // Vcc in millivolts
 }
 
+//MODIFIED: This function is now fully non-blocking.
 void updateTemperature() {
     static unsigned long lastTempRequestTime = 0;
     static bool conversionStarted = false;
 
+    // This runs in a two-step, non-blocking way.
+    // On the first pass, it requests the temperature.
+    // On the second pass (after the conversion time), it reads it.
     if (!conversionStarted) {
-        sensors.requestTemperatures();
+        sensors.requestTemperatures(); // Send the (non-blocking) command
         conversionStarted = true;
         lastTempRequestTime = millis();
     }
     
+    // The sensor needs ~750ms to convert. We check after that time has passed.
     if (conversionStarted && millis() - lastTempRequestTime > 800) {
         float tempC = sensors.getTempCByIndex(0);
 
