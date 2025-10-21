@@ -70,6 +70,9 @@ bool longPressActionTaken = false;
 // NEW: track whether the 10% warning has already been handled
 bool low10Handled = false;
 
+// NEW: track whether we've already signaled an overheat condition with the flash pattern
+bool overheatFlashDone = false;
+
 int highlightedPreset = 0;
 const int presets[] = {10, 25, 50, 100};
 
@@ -79,6 +82,11 @@ int batteryPercent = 0;
 
 // NEW: Variable for temperature monitoring
 float ledTemperature = 0.0;
+
+// NEW: Overheat supervisory condition
+bool isOverheat = false;
+const float TEMP_OVERHEAT_C = 35.0;  // Assumption: throttle/off above this
+const float TEMP_RECOVER_C = 30.0;   // Assumption: resume below this
 
 
 // --- Forward Declarations ---
@@ -130,6 +138,20 @@ void flashBurst(int bursts, int pulsesPerBurst, unsigned long onMs, unsigned lon
     }
     brightness = savedBrightness;
     isLampOn = savedLampOn;
+}
+
+// NEW: Full-screen overheat message (avoids overlapping headers)
+void drawOverheatScreen() {
+    u8g2.firstPage();
+    do {
+        u8g2.setFont(u8g2_font_7x13B_tr);
+        u8g2_uint_t w = u8g2.getStrWidth("OVERHEAT");
+        u8g2.drawStr((128 - w) / 2, 28, "OVERHEAT");
+        u8g2.setFont(u8g2_font_6x12_tr);
+        const char* msg = "Cooling...";
+        w = u8g2.getStrWidth(msg);
+        u8g2.drawStr((128 - w) / 2, 48, msg);
+    } while (u8g2.nextPage());
 }
 
 
@@ -196,7 +218,23 @@ void loop() {
             // Check and run the temperature update task on a different, offset schedule
             if (currentTime - lastTempCheckTime > SENSOR_UPDATE_INTERVAL) {
                 lastTempCheckTime = currentTime;
-                updateTemperature(); 
+                updateTemperature();
+                // Update overheat supervisory flag with hysteresis and one-time entry flash
+                if (isOverheat) {
+                    if (ledTemperature <= TEMP_RECOVER_C) {
+                        isOverheat = false;
+                        overheatFlashDone = false; // reset for next entry
+                    }
+                } else {
+                    if (ledTemperature >= TEMP_OVERHEAT_C) {
+                        isOverheat = true;
+                        if (!overheatFlashDone) {
+                            // Distinct pattern for overheat: 2 bursts x 6 pulses, 150ms on/off
+                            flashBurst(2, 6, 150, 150, brightness);
+                            overheatFlashDone = true;
+                        }
+                    }
+                }
             }
 
             // If all checks pass, proceed with normal operation.
@@ -360,7 +398,8 @@ void updateBatteryStats() {
 
 
 void updateOutputs() {
-    int pwmValue = (isLampOn) ? map(brightness, 0, 100, 0, 511) : 0;
+    // Clamp output if overheated
+    int pwmValue = (isLampOn && !isOverheat) ? map(brightness, 0, 100, 0, 511) : 0;
     if(brightness == 0 && isLampOn) pwmValue = 0;
     OCR1A = pwmValue;
 }
@@ -373,6 +412,8 @@ void drawDisplay() {
     static int lastBatteryPercent = -1;
     // NEW: Track temperature for redraws
     static float lastTemperature = -999; 
+    // NEW: Track overheat flag for redraws
+    static bool lastIsOverheat = false;
 
     // NEW: The 'if' condition now includes the temperature
     if (brightness != lastDisplayedBrightness ||
@@ -380,7 +421,8 @@ void drawDisplay() {
           currentMode != lastUpdatedMode ||
            highlightedPreset != lastHighlightedPreset ||
             batteryPercent != lastBatteryPercent ||
-             ledTemperature != lastTemperature) {
+             ledTemperature != lastTemperature ||
+             isOverheat != lastIsOverheat) {
         u8g2.firstPage();
         do {
             if (!isLampOn) {
@@ -388,10 +430,15 @@ void drawDisplay() {
                 u8g2_uint_t textWidth = u8g2.getStrWidth("OFF");
                 u8g2.drawStr((128 - textWidth) / 2, 38, "OFF");
             } else {
-                switch(currentMode) {
-                    case MODE_SMOOTH_DIM: drawSmoothDimScreen(); break;
-                    case MODE_PRESET_SELECT: drawPresetScreen(); break;
-                    case MODE_STATS: drawStatsScreen(); break;
+                if (isOverheat) {
+                    // Replace normal UI with a dedicated warning to avoid overlap
+                    drawOverheatScreen();
+                } else {
+                    switch(currentMode) {
+                        case MODE_SMOOTH_DIM: drawSmoothDimScreen(); break;
+                        case MODE_PRESET_SELECT: drawPresetScreen(); break;
+                        case MODE_STATS: drawStatsScreen(); break;
+                    }
                 }
             }
         } while (u8g2.nextPage());
@@ -402,7 +449,8 @@ void drawDisplay() {
         lastHighlightedPreset = highlightedPreset;
         lastBatteryPercent = batteryPercent;
         // NEW: Update the last known temperature
-        lastTemperature = ledTemperature; 
+        lastTemperature = ledTemperature;
+        lastIsOverheat = isOverheat;
     }
 }
 
