@@ -90,6 +90,9 @@ void updateBatteryStats();
 long readVcc();
 // NEW: Forward declaration for temperature function
 void updateTemperature();
+// Forward declaration for the new low battery screen function
+void drawLowBatteryScreen();
+
 
 void setup() {
     IrReceiver.begin(IR_RECEIVE_PIN, DISABLE_LED_FEEDBACK);
@@ -120,26 +123,25 @@ void setup() {
 
 void loop() {
     // MODIFIED: Main loop is now controlled by the master state machine
+    // Move periodic task timers out here so all states can access them.
+    static unsigned long lastBatteryCheckTime = 0;
+    static unsigned long lastTempCheckTime = 1000; // Offset by 1 second to prevent collision
+
+    const unsigned long SENSOR_UPDATE_INTERVAL = 2000; // 2 seconds
+
+    unsigned long currentTime = millis();
+
     switch (currentState) {
         case STATE_OPERATING:
-            // --- Fast Loop (runs thousands of times per second) ---
-            // These functions are always called to ensure maximum responsiveness.
-            handleInputs();
-            updateOutputs();
-            drawDisplay();
-
-            // --- A proper, non-interfering scheduler for slow tasks ---
-            static unsigned long lastBatteryCheckTime = 0;
-            static unsigned long lastTempCheckTime = 1000; // Offset by 1 second to prevent collision
-
-            const unsigned long SENSOR_UPDATE_INTERVAL = 2000; // 2 seconds
-
-            unsigned long currentTime = millis();
-
             // Check and run the battery update task
             if (currentTime - lastBatteryCheckTime > SENSOR_UPDATE_INTERVAL) {
                 lastBatteryCheckTime = currentTime;
                 updateBatteryStats();
+                // Check for critical low battery condition FIRST.
+                if (batteryVoltage <= 6.4 && batteryVoltage > 0) {
+                    currentState = STATE_LOW_BATTERY;
+                    break; // Exit IMMEDIATELY to prevent inconsistent state
+                }
             }
 
             // Check and run the temperature update task on a different, offset schedule
@@ -147,6 +149,11 @@ void loop() {
                 lastTempCheckTime = currentTime;
                 updateTemperature(); 
             }
+
+            // If all checks pass, proceed with normal operation.
+            handleInputs();
+            updateOutputs();
+            drawDisplay();
             break;
 
         case STATE_CHARGING:
@@ -154,7 +161,33 @@ void loop() {
             break;
 
         case STATE_LOW_BATTERY:
-            // Placeholder for low battery logic
+            // Force the PWM output fully off and show a persistent low-battery screen.
+            // 1) Set compare to 0
+            OCR1A = 0;
+            // 2) Disconnect OC1A so the hardware can't drive the pin
+            TCCR1A &= ~_BV(COM1A1);
+            // 3) Ensure the pin is driven LOW by the GPIO
+            pinMode(PWM_OUTPUT_PIN, OUTPUT);
+            digitalWrite(PWM_OUTPUT_PIN, LOW);
+
+            // Draw the low battery UI so the user sees the condition
+            drawLowBatteryScreen();
+
+            // Periodically re-check battery to see if we can recover
+            if (currentTime - lastBatteryCheckTime > SENSOR_UPDATE_INTERVAL) {
+                lastBatteryCheckTime = currentTime;
+                updateBatteryStats();
+                // If voltage recovers above a safe threshold, re-enable PWM and return to operating
+                if (currentState == STATE_LOW_BATTERY && batteryVoltage > 6.6) {
+                    // Re-enable OC1A so the PWM resumes
+                    TCCR1A |= _BV(COM1A1);
+                    // Make sure the output compare register matches the current brightness
+                    updateOutputs();
+                    currentState = STATE_OPERATING;
+                    break; // Exit IMMEDIATELY to avoid running operating logic this cycle
+                }
+            }
+
             break;
 
         case STATE_OVERHEAT:
@@ -379,6 +412,18 @@ void drawStatsScreen() {
     dtostrf(ledTemperature, 4, 1, tempString);
     sprintf(buffer, "Temp: %s C", tempString);
     u8g2.drawStr(0, 55, buffer);
+}
+
+// Helper function to draw the low battery warning screen
+void drawLowBatteryScreen() {
+    u8g2.firstPage();
+    do {
+        u8g2.setFont(u8g2_font_7x13B_tr);
+        u8g2_uint_t textWidth = u8g2.getStrWidth("LOW BATTERY");
+        u8g2.drawStr((128 - textWidth) / 2, 25, "LOW BATTERY");
+        textWidth = u8g2.getStrWidth("Please Charge");
+        u8g2.drawStr((128 - textWidth) / 2, 45, "Please Charge");
+    } while (u8g2.nextPage());
 }
 
 long readVcc() {
