@@ -7,6 +7,8 @@
 // NEW: Include libraries for the temperature sensor
 #include <OneWire.h>
 #include <DallasTemperature.h>
+// AVR sleep control
+#include <avr/sleep.h>
 
 // --- Pin Definitions ---
 #define ENCODER_PIN_A 2
@@ -65,6 +67,8 @@ int lastBrightness = brightness;
 bool isLampOn = true;
 const int rotaryScaleFactor = 2;
 bool longPressActionTaken = false;
+// NEW: track whether the 10% warning has already been handled
+bool low10Handled = false;
 
 int highlightedPreset = 0;
 const int presets[] = {10, 25, 50, 100};
@@ -92,6 +96,41 @@ long readVcc();
 void updateTemperature();
 // Forward declaration for the new low battery screen function
 void drawLowBatteryScreen();
+
+// Helper: flash the lamp in bursts. bursts x pulsesPerBurst, with on/off timings.
+void flashBurst(int bursts, int pulsesPerBurst, unsigned long onMs, unsigned long offMs, int flashBrightness) {
+    // Save state
+    int savedBrightness = brightness;
+    bool savedLampOn = isLampOn;
+    uint16_t savedOCR = OCR1A;
+    bool ocWasEnabled = (TCCR1A & _BV(COM1A1));
+
+    // Ensure PWM is connected for flashing
+    TCCR1A |= _BV(COM1A1);
+
+    int pwmFlash = map(constrain(flashBrightness, 0, 100), 0, 100, 0, 511);
+
+    for (int b = 0; b < bursts; ++b) {
+        for (int p = 0; p < pulsesPerBurst; ++p) {
+            OCR1A = pwmFlash;          // turn on
+            delay(onMs);
+            OCR1A = 0;                 // turn off
+            delay(offMs);
+        }
+        delay(1000); // gap between bursts
+    }
+
+    // Restore previous state
+    if (!ocWasEnabled) {
+        TCCR1A &= ~_BV(COM1A1);
+        pinMode(PWM_OUTPUT_PIN, OUTPUT);
+        digitalWrite(PWM_OUTPUT_PIN, LOW);
+    } else {
+        OCR1A = savedOCR;
+    }
+    brightness = savedBrightness;
+    isLampOn = savedLampOn;
+}
 
 
 void setup() {
@@ -137,8 +176,18 @@ void loop() {
             if (currentTime - lastBatteryCheckTime > SENSOR_UPDATE_INTERVAL) {
                 lastBatteryCheckTime = currentTime;
                 updateBatteryStats();
-                // Check for critical low battery condition FIRST.
-                if (batteryVoltage <= 6.4 && batteryVoltage > 0) {
+                // Handle 10% notification once (clamp brightness afterward)
+                if (!low10Handled && batteryPercent <= 10 && batteryPercent > 0) {
+                    // Short bursts: 3 bursts of 5 pulses, 50ms on/off
+                    flashBurst(3, 5, 50, 50, brightness);
+                    // Clamp brightness to 10%
+                    brightness = 10;
+                    myEncoder.write(brightness * rotaryScaleFactor);
+                    low10Handled = true;
+                }
+
+                // Enter low-battery state when reaching 0%
+                if (batteryPercent <= 0) {
                     currentState = STATE_LOW_BATTERY;
                     break; // Exit IMMEDIATELY to prevent inconsistent state
                 }
@@ -161,33 +210,35 @@ void loop() {
             break;
 
         case STATE_LOW_BATTERY:
-            // Force the PWM output fully off and show a persistent low-battery screen.
-            // 1) Set compare to 0
+            // At 0%: flash longer bursts, then show message and power down
+            // Long bursts: 3 bursts of 5 pulses, 200ms on/off
+            flashBurst(3, 5, 200, 200, brightness);
+
+            // Shut LED off and ensure timer cannot drive the pin
             OCR1A = 0;
-            // 2) Disconnect OC1A so the hardware can't drive the pin
             TCCR1A &= ~_BV(COM1A1);
-            // 3) Ensure the pin is driven LOW by the GPIO
             pinMode(PWM_OUTPUT_PIN, OUTPUT);
             digitalWrite(PWM_OUTPUT_PIN, LOW);
 
-            // Draw the low battery UI so the user sees the condition
+            // Show persistent low battery message for 10 seconds
             drawLowBatteryScreen();
+            delay(10000);
 
-            // Periodically re-check battery to see if we can recover
-            if (currentTime - lastBatteryCheckTime > SENSOR_UPDATE_INTERVAL) {
-                lastBatteryCheckTime = currentTime;
-                updateBatteryStats();
-                // If voltage recovers above a safe threshold, re-enable PWM and return to operating
-                if (currentState == STATE_LOW_BATTERY && batteryVoltage > 6.6) {
-                    // Re-enable OC1A so the PWM resumes
-                    TCCR1A |= _BV(COM1A1);
-                    // Make sure the output compare register matches the current brightness
-                    updateOutputs();
-                    currentState = STATE_OPERATING;
-                    break; // Exit IMMEDIATELY to avoid running operating logic this cycle
-                }
-            }
+            // Put OLED into power-save so it stops drawing
+            u8g2.setPowerSave(1);
 
+            // Enter power-down sleep (board will only wake on reset/power-cycle or configured external wake sources)
+            set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+            noInterrupts();
+            sleep_enable();
+            interrupts();
+            sleep_cpu();
+            sleep_disable();
+
+            // On wake (usually a reset/power cycle), restore display and state
+            u8g2.setPowerSave(0);
+            low10Handled = false; // reset the 10% handler
+            currentState = STATE_OPERATING;
             break;
 
         case STATE_OVERHEAT:
